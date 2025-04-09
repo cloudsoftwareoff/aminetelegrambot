@@ -22,7 +22,7 @@ IDENTIFY, PHONE, OFFER, REJECT_REASON, ADMIN_ADD_CODE, ADMIN_ADD_CREDITS, ADMIN_
 # New states for altering user credits
 ADMIN_SELECT_USER_FOR_CREDIT, ADMIN_ALTER_CREDIT = range(7, 9)
 
-ADMIN_ID = 5819282818 #8128231719
+ADMIN_ID = 7168043490 #8128231719
 
 # Database setup
 def init_db():
@@ -663,7 +663,7 @@ async def retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def main() -> None:
     init_db()
-    application = Application.builder().token("7739976856:AAHwabJ3g73GGccW4oy72cP8JRmAoodfLTs").build()
+    application = Application.builder().token("7560159485:AAFB6_gpanxx8m4CMLHpU0E4McBSjlH8z4c").build()
 
     # Admin conversation handler for adding users
     admin_add_conv = ConversationHandler(
