@@ -163,8 +163,17 @@ async def handle_tx_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     user_id = update.message.from_user.id
     
     logger.info(f"User {code} submitted TXID: {tx_id}")
-    sanitized_tx_id = tx_id.replace('_', '-')  # Replace underscores with hyphens
-
+    
+    # Sanitize tx_id to ensure it's safe for callback data
+    # Only keep alphanumeric characters and limited symbols
+    # and limit the length to ensure we don't exceed Telegram's limits
+    import re
+    sanitized_tx_id = re.sub(r'[^a-zA-Z0-9\-_]', '', tx_id)
+    sanitized_tx_id = sanitized_tx_id[:30]  # Limit length
+    
+    # Store the full tx_id in user_data for reference
+    context.user_data['full_tx_id'] = tx_id
+    
     keyboard = [
     [
         InlineKeyboardButton("✅ تأكيد الشحن", callback_data=f"confirm_refill_{code}_{sanitized_tx_id}"),
@@ -175,7 +184,7 @@ async def handle_tx_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     try:
-        # Use await here to ensure the message is sent
+        # Send full TX ID in the message text, but use sanitized version in callback data
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"🔄 طلب شحن رصيد جديد!\nالكود: {code}\nالمستخدم: {user_id}\nرقم المعاملة: `{tx_id}`\nالرصيد الحالي: {user_credits}",

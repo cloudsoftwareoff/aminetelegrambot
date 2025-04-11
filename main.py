@@ -110,10 +110,13 @@ def main() -> None:
     application.add_handler(refill_conv_handler)
 
     application.add_handler(user_conv_handler)
-    
+    application.add_handler(CallbackQueryHandler(admin_handle_order, pattern='^(accept|reject)_\d+$'))
+
+# For refill actions
+    application.add_handler(CallbackQueryHandler(handle_refill_confirmation, pattern='^(confirm|reject)_refill_'))
     application.add_handler(CallbackQueryHandler(refill_credits, pattern='^refill_credits$'))
     application.add_handler(CallbackQueryHandler(continue_without_refill, pattern='^continue_without_refill$'))
-    application.add_handler(CallbackQueryHandler(handle_refill_confirmation, pattern='^(confirm|reject)_refill_'))
+    #application.add_handler(CallbackQueryHandler(handle_refill_confirmation, pattern='^(confirm|reject)_refill_'))
     
     application.run_polling()
 

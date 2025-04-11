@@ -315,8 +315,27 @@ async def admin_handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    action, order_id = query.data.split('_')
-    order_id = int(order_id)
+    data = query.data
+    parts = data.split('_')
+    
+    # Check if this is a refill-related action
+    if len(parts) > 1 and parts[1] == 'refill':
+        # Let the refill confirmation handler deal with this
+        return await handle_refill_confirmation(update, context)
+    
+    # Otherwise proceed with order handling
+    if len(parts) < 2:
+        await query.edit_message_text("Invalid request data")
+        return ConversationHandler.END
+        
+    action = parts[0]
+    order_id = parts[1]
+    
+    try:
+        order_id = int(order_id)
+    except ValueError:
+        await query.edit_message_text("Invalid order ID")
+        return ConversationHandler.END
     
     order = get_order_details(order_id)
     if not order or order[3] != 'pending':
@@ -449,7 +468,13 @@ async def handle_refill_confirmation(update: Update, context: ContextTypes.DEFAU
     
     action = data_parts[0]  # confirm or reject
     code = data_parts[2]
-    tx_id = data_parts[3].replace('-', '_') 
+    sanitized_tx_id = data_parts[3]
+    
+    # Get the original message text to extract the full TX ID
+    message_text = query.message.text
+    import re
+    tx_id_match = re.search(r'رقم المعاملة: `([^`]+)`', message_text)
+    tx_id = tx_id_match.group(1) if tx_id_match else sanitized_tx_id
     
     logger.info(f"Admin {action}ed refill for user {code} with TXID {tx_id}")
     
