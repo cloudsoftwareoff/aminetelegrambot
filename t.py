@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 IDENTIFY, PHONE, OFFER, REJECT_REASON, ADMIN_ADD_CODE, ADMIN_ADD_CREDITS, ADMIN_DELETE_CONFIRM = range(7)
 # New states for altering user credits
 ADMIN_SELECT_USER_FOR_CREDIT, ADMIN_ALTER_CREDIT = range(7, 9)
-
+USDT_TRANSACTION = 9
 ADMIN_ID = 7168043490 #8128231719
 
 # Database setup
@@ -55,7 +55,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=reply_markup
     )
     return IDENTIFY
-
+async def check_credits_and_notify(context: ContextTypes.DEFAULT_TYPE, telegram_id: int, code: str, credits: int):
+    if credits <= 3:  # Notify when credits are 3 or less
+        keyboard = [
+            [InlineKeyboardButton("إعادة تعبئة الرصيد (10 USDT لكل نقطة)", callback_data=f"refill_{code}")],
+            [InlineKeyboardButton("إلغاء", callback_data=f"cancel_refill_{code}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await context.bot.send_message(
+            chat_id=telegram_id,
+            text=f"⚠️ رصيدك منخفض! لديك فقط {credits} نقطة(s) متبقية.\nهل ترغب في إعادة تعبئة الرصيد؟ (10 USDT لكل نقطة)",
+            reply_markup=reply_markup
+        )
 async def show_admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("👥 عرض المستخدمين", callback_data="admin_view_users")],
@@ -486,7 +498,146 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.edit_message_text(
         f"✅ تم تسجيل الطلب!\nالتلفون: {phone_number}\nالعرض: {selected_offer}\nالرصيد: {credits}\nفي انتظار تأكيد الإدارة."
     )
+    
+    # Check credits and notify if low
+    await check_credits_and_notify(context, query.from_user.id, code, credits - 1)
+    
     return ConversationHandler.END
+
+async def start_refill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    _, code = query.data.split('_', 1)
+    context.user_data['refill_code'] = code
+    
+    # Get current credits
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT credits FROM users WHERE code = ?", (code,))
+    credits = c.fetchone()[0]
+    conn.close()
+    
+    await query.edit_message_text(
+        f"لإعادة تعبئة الرصيد:\n"
+        f"1. أرسل USDT إلى العنوان التالي: [USDT_ADDRESS_HERE]\n"
+        f"2. أرسل لنا معرف المعاملة (Transaction ID)\n"
+        f"3. سنقوم بتحويل النقاط خلال 24 ساعة\n\n"
+        f"سعر النقطة: 10 USDT\n"
+        f"الحد الأدنى: 1 نقطة\n"
+        f"الرصيد الحالي: {credits} نقطة(s)"
+    )
+    return USDT_TRANSACTION
+
+async def handle_usdt_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    transaction_id = update.message.text
+    code = context.user_data.get('refill_code')
+    user_id = update.message.from_user.id
+    
+    if not code:
+        await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+        return ConversationHandler.END
+    
+    # Send transaction details to admin
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ تأكيد", callback_data=f"confirm_refill_{code}_{user_id}_{transaction_id}"),
+            InlineKeyboardButton("❌ رفض", callback_data=f"reject_refill_{code}_{user_id}_{transaction_id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"طلب تعبئة رصيد جديد!\nالكود: {code}\nمعرف المعاملة: {transaction_id}\nمعرف المستخدم: {user_id}",
+        reply_markup=reply_markup
+    )
+    
+    await update.message.reply_text(
+        "تم إرسال تفاصيل المعاملة للإدارة. سيتم مراجعتها وإعلامك بالنتيجة."
+    )
+    return ConversationHandler.END
+
+async def cancel_refill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text("تم إلغاء عملية إعادة التعبئة.")
+    return ConversationHandler.END
+
+
+async def admin_handle_refill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    action, code, user_id, transaction_id = query.data.split('_', 3)
+    
+    if action == "confirm":
+        # Ask admin for number of credits to add
+        context.user_data['refill_code'] = code
+        context.user_data['refill_user_id'] = user_id
+        context.user_data['refill_transaction_id'] = transaction_id
+        
+        keyboard = [[InlineKeyboardButton("إلغاء", callback_data="cancel_refill_approval")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"كم عدد النقاط التي تريد إضافتها للمستخدم {code}?\nمعرف المعاملة: {transaction_id}",
+            reply_markup=reply_markup
+        )
+        return ADMIN_ALTER_CREDIT
+    
+    elif action == "reject":
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"تم رفض طلب إعادة تعبئة الرصيد الخاص بك.\nمعرف المعاملة: {transaction_id}\nالرجاء التواصل مع الإدارة لمزيد من المعلومات."
+        )
+        
+        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"تم رفض طلب إعادة تعبئة الرصيد للمستخدم {code}.",
+            reply_markup=reply_markup
+        )
+    
+    return ConversationHandler.END
+
+async def admin_confirm_refill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message.from_user.id != ADMIN_ID:
+        return ConversationHandler.END
+    
+    try:
+        credits_to_add = int(update.message.text)
+        code = context.user_data.get('refill_code')
+        user_id = context.user_data.get('refill_user_id')
+        transaction_id = context.user_data.get('refill_transaction_id')
+        
+        if not code:
+            await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+            return ConversationHandler.END
+        
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute("UPDATE users SET credits = credits + ? WHERE code = ?", (credits_to_add, code))
+        conn.commit()
+        conn.close()
+        
+        # Notify user
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ تمت إضافة {credits_to_add} نقطة(s) إلى رصيدك!\nمعرف المعاملة: {transaction_id}\nيمكنك الآن تقديم طلبات جديدة."
+        )
+        
+        await update.message.reply_text(
+            f"تمت إضافة {credits_to_add} نقطة(s) إلى رصيد المستخدم {code}."
+        )
+    except ValueError:
+        await update.message.reply_text("يرجى إدخال رقم صحيح للنقاط.")
+        return ADMIN_ALTER_CREDIT
+    
+    return ConversationHandler.END
+
 
 async def admin_handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -676,7 +827,33 @@ def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
+    refill_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_refill, pattern='^refill_')],
+        states={
+            USDT_TRANSACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_usdt_transaction)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_refill, pattern='^cancel_refill_'),
+            CommandHandler('cancel', cancel)
+        ],
+    )
     
+    # Add admin refill approval handler
+    admin_refill_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_handle_refill, pattern='^(confirm|reject)_refill_')],
+        states={
+            ADMIN_ALTER_CREDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_confirm_refill)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_refill, pattern='^cancel_refill_approval'),
+            CommandHandler('cancel', cancel)
+        ],
+    )
+
+    # Add the new handlers to application
+    application.add_handler(refill_conv)
+    application.add_handler(admin_refill_handler)
+
     # Admin conversation handler for altering user credits
     admin_alter_credit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(select_user_for_credit, pattern='^alter_credit_')],
