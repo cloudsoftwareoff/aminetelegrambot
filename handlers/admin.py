@@ -488,7 +488,7 @@ async def handle_refill_confirmation(update: Update, context: ContextTypes.DEFAU
     
     if action == "confirm":
         # Amount to add (can be modified to variable amounts)
-        added_credits = 5
+        added_credits = 50
         new_credits = current_credits + added_credits
         
         # Update user credits

@@ -137,8 +137,12 @@ async def refill_credits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     
     await query.edit_message_text(
-        f"لشحن رصيدك، الرجاء إرسال USDT (شبكة Tron/TRC20) إلى العنوان التالي:\n\n`{USDT_WALLET}`\n\n"
-        f"بعد الإرسال، قم بإدخال رقم معرف المعاملة (TXID) للتحقق:",
+    "📌 لشراء الرصيد:\n\n"
+    "1. أرسل مبلغ 295 USDT عبر شبكة TRON (TRC20)\n"
+    f"2. إلى العنوان التالي: `{USDT_WALLET}`\n\n"
+    "✅ ستحصل على 50 رصيد مباشرة بعد التحقق من التحويل\n\n"
+    "📝 بعد الإرسال، أرسل لنا رقم المعاملة (TXID) للتحقق وإضافة الرصيد إلى حسابك",
+    parse_mode="Markdown"
     )
     return REFILL_STATE
 
@@ -165,8 +169,7 @@ async def handle_tx_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     logger.info(f"User {code} submitted TXID: {tx_id}")
     
     # Sanitize tx_id to ensure it's safe for callback data
-    # Only keep alphanumeric characters and limited symbols
-    # and limit the length to ensure we don't exceed Telegram's limits
+
     import re
     sanitized_tx_id = re.sub(r'[^a-zA-Z0-9\-_]', '', tx_id)
     sanitized_tx_id = sanitized_tx_id[:30]  # Limit length
