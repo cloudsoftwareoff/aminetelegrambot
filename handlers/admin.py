@@ -3,10 +3,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 from database import (
     get_all_users, get_pending_orders, get_order_details, update_order_status,
-    add_or_update_user, delete_user, update_user_credits, get_user_by_code
+    add_or_update_user, delete_user,deduct_credit, update_user_credits, get_user_by_code, get_user_credits
 )
 from constants import *
-
 from .common import cancel
 
 logger = logging.getLogger(__name__)
@@ -53,7 +52,15 @@ async def admin_handle_dashboard(update: Update, context: ContextTypes.DEFAULT_T
             )
             return ConversationHandler.END
         
-        response = "المستخدمين:\n" + "\n".join([f"الكود: {u[0]}, الرصيد: {u[1]}, التلفون: {u[2] or 'غير متوفر'}" for u in users])
+        response = "المستخدمين:\n"
+        for user in users:
+            user_credits = get_user_credits(user[0])
+            credits_info = (
+                f"25GO: {user_credits['credits_25go']}, "
+                f"35GO: {user_credits['credits_35go']}, "
+                f"60GO: {user_credits['credits_60go']}"
+            )
+            response += f"الكود: {user[0]}, الرصيد: {credits_info}, التلفون: {user[2] or 'غير متوفر'}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -116,8 +123,14 @@ async def admin_handle_dashboard(update: Update, context: ContextTypes.DEFAULT_T
         
         user_buttons = []
         for user in users:
+            user_credits = get_user_credits(user[0])
+            credits_info = (
+                f"25GO: {user_credits['credits_25go']}, "
+                f"35GO: {user_credits['credits_35go']}, "
+                f"60GO: {user_credits['credits_60go']}"
+            )
             user_buttons.append([InlineKeyboardButton(
-                f"{user[0]} (الرصيد: {user[1]})",
+                f"{user[0]} ({credits_info})",
                 callback_data=f"alter_credit_{user[0]}"
             )])
         
@@ -167,33 +180,142 @@ async def admin_add_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     code = update.message.text
     context.user_data['new_user_code'] = code
     
-    await update.message.reply_text(f"أدخل عدد النقاط للمستخدم {code}:")
+    keyboard = [
+        [InlineKeyboardButton("25GO", callback_data="add_25go")],
+        [InlineKeyboardButton("35GO", callback_data="add_35go")],
+        [InlineKeyboardButton("60GO", callback_data="add_60go")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"اختر نوع الرصيد لإضافته للمستخدم {code}:",
+        reply_markup=reply_markup
+    )
     return ADMIN_ADD_CREDITS
-
 async def admin_add_credits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    credit_type = query.data.replace("add_", "")
+    context.user_data['credit_type'] = credit_type
+    
+    logger.info(f"Admin adding credits for user {context.user_data.get('new_user_code')}, type: {credit_type}")
+    
+    await query.edit_message_text(
+        f"أدخل عدد النقاط للمستخدم {context.user_data['new_user_code']} (نوع الرصيد: {credit_type.upper()}):"
+    )
+    logger.info(f"Transitioning to state: ADMIN_ENTER_CREDITS ({ADMIN_ENTER_CREDITS})")
+    return ADMIN_ENTER_CREDITS
+
+async def admin_enter_credits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message.from_user.id != ADMIN_ID:
+        logger.warning("Non-admin attempted to add credits")
+        return ConversationHandler.END
+    
+    logger.info(f"Processing credit input for user {context.user_data.get('new_user_code')}")
+    
+    try:
+        credits = int(update.message.text)
+        code = context.user_data.get('new_user_code')
+        credit_type = context.user_data.get('credit_type')
+        
+        if not code or not credit_type:
+            logger.error("Missing code or credit_type in context.user_data")
+            await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+            return ConversationHandler.END
+        
+        # Validate credit type
+        if credit_type not in ['25go', '35go', '60go']:
+            logger.error(f"Invalid credit type: {credit_type}")
+            await update.message.reply_text("نوع الرصيد غير صالح.")
+            return ConversationHandler.END
+        
+        # Get current credits
+        user_credits = get_user_credits(code) or {
+            'credits_25go': 0,
+            'credits_35go': 0,
+            'credits_60go': 0
+        }
+        
+        # Update the specific credit type
+        user_credits[f'credits_{credit_type}'] = credits
+        
+        # Update user with all credit types
+        try:
+            add_or_update_user(
+                code,
+                user_credits['credits_25go'],
+                user_credits['credits_35go'],
+                user_credits['credits_60go']
+            )
+            logger.info(f"Successfully updated credits for user {code}: {user_credits}")
+        except Exception as e:
+            logger.error(f"Failed to update user {code}: {e}")
+            await update.message.reply_text("حدث خطأ أثناء تحديث الرصيد. حاول مرة أخرى.")
+            return ConversationHandler.END
+        
+        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ تم إضافة/تحديث المستخدم {code}.\n"
+            f"25GO: {user_credits['credits_25go']}\n"
+            f"35GO: {user_credits['credits_35go']}\n"
+            f"60GO: {user_credits['credits_60go']}",
+            reply_markup=reply_markup
+        )
+        
+    except ValueError:
+        logger.warning(f"Invalid credit input: {update.message.text}")
+        await update.message.reply_text("يرجى إدخال رقم صحيح للنقاط.")
+        return ADMIN_ENTER_CREDITS
+    
+    return ConversationHandler.END
+
+async def admin_enter_credits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.from_user.id != ADMIN_ID:
         return ConversationHandler.END
     
     try:
         credits = int(update.message.text)
         code = context.user_data.get('new_user_code')
+        credit_type = context.user_data.get('credit_type')
         
-        if not code:
+        if not code or not credit_type:
             await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
             return ConversationHandler.END
         
-        add_or_update_user(code, credits)
+        # Get current credits
+        user_credits = get_user_credits(code) or {
+            'credits_25go': 0,
+            'credits_35go': 0,
+            'credits_60go': 0
+        }
+        
+        # Update the specific credit type
+        user_credits[f'credits_{credit_type}'] = credits
+        
+        # Update user with all credit types
+        add_or_update_user(
+            code,
+            user_credits['credits_25go'],
+            user_credits['credits_35go'],
+            user_credits['credits_60go']
+        )
         
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            f"✅ تم إضافة/تحديث المستخدم {code} برصيد {credits}.",
+            f"✅ تم إضافة/تحديث المستخدم {code}.\n"
+            f"25GO: {user_credits['credits_25go']}\n"
+            f"35GO: {user_credits['credits_35go']}\n"
+            f"60GO: {user_credits['credits_60go']}",
             reply_markup=reply_markup
         )
     except ValueError:
         await update.message.reply_text("يرجى إدخال رقم صحيح للنقاط.")
-        return ADMIN_ADD_CREDITS
+        return ADMIN_ENTER_CREDITS
     
     return ConversationHandler.END
 
@@ -204,8 +326,8 @@ async def select_user_for_credit(update: Update, context: ContextTypes.DEFAULT_T
     _, _, code = query.data.partition('_credit_')
     context.user_data['alter_credit_code'] = code
     
-    user = get_user_by_code(code)
-    if not user:
+    user_credits = get_user_credits(code)
+    if not user_credits:
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
@@ -214,15 +336,38 @@ async def select_user_for_credit(update: Update, context: ContextTypes.DEFAULT_T
         )
         return ConversationHandler.END
     
-    current_credits = user[1]
-    context.user_data['current_credits'] = current_credits
+    context.user_data['current_credits'] = user_credits
     
-    keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
+    keyboard = [
+        [InlineKeyboardButton("25GO", callback_data="edit_25go")],
+        [InlineKeyboardButton("35GO", callback_data="edit_35go")],
+        [InlineKeyboardButton("60GO", callback_data="edit_60go")],
+        [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        f"المستخدم: {code}\nالرصيد الحالي: {current_credits}\n\nأدخل الرصيد الجديد:",
+        f"المستخدم: {code}\n"
+        f"الرصيد الحالي:\n"
+        f"25GO: {user_credits['credits_25go']}\n"
+        f"35GO: {user_credits['credits_35go']}\n"
+        f"60GO: {user_credits['credits_60go']}\n\n"
+        f"اختر نوع الرصيد لتعديله:",
         reply_markup=reply_markup
+    )
+    return ADMIN_SELECT_CREDIT_TYPE
+
+async def admin_select_credit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    credit_type = query.data.replace("edit_", "")
+    context.user_data['credit_type'] = credit_type
+    
+    current_value = context.user_data['current_credits'][f'credits_{credit_type}']
+    
+    await query.edit_message_text(
+        f"أدخل الرصيد الجديد لنوع {credit_type.upper()} (الحالي: {current_value}):"
     )
     return ADMIN_ALTER_CREDIT
 
@@ -233,22 +378,32 @@ async def admin_alter_credit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         new_credits = int(update.message.text)
         code = context.user_data.get('alter_credit_code')
+        credit_type = context.user_data.get('credit_type')
         current_credits = context.user_data.get('current_credits')
         
-        if not code:
+        if not code or not credit_type or not current_credits:
             await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
             return ConversationHandler.END
         
-        update_user_credits(code, new_credits)
+        # Update the specific credit type
+        current_credits[f'credits_{credit_type}'] = new_credits
         
-        change = new_credits - current_credits
-        change_text = f"(+{change})" if change > 0 else f"({change})"
+        # Update user with all credit types
+        add_or_update_user(
+            code,
+            current_credits['credits_25go'],
+            current_credits['credits_35go'],
+            current_credits['credits_60go']
+        )
         
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            f"✅ تم تعديل رصيد المستخدم {code}.\nالرصيد السابق: {current_credits}\nالرصيد الجديد: {new_credits} {change_text}",
+            f"✅ تم تعديل رصيد المستخدم {code}.\n"
+            f"25GO: {current_credits['credits_25go']}\n"
+            f"35GO: {current_credits['credits_35go']}\n"
+            f"60GO: {current_credits['credits_60go']}",
             reply_markup=reply_markup
         )
     except ValueError:
@@ -315,30 +470,12 @@ async def admin_handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    parts = data.split('_')
-    
-    # Check if this is a refill-related action
-    if len(parts) > 1 and parts[1] == 'refill':
-        # Let the refill confirmation handler deal with this
-        return await handle_refill_confirmation(update, context)
-    
-    # Otherwise proceed with order handling
-    if len(parts) < 2:
-        await query.edit_message_text("Invalid request data")
-        return ConversationHandler.END
-        
+    parts = query.data.split('_')
     action = parts[0]
-    order_id = parts[1]
-    
-    try:
-        order_id = int(order_id)
-    except ValueError:
-        await query.edit_message_text("Invalid order ID")
-        return ConversationHandler.END
+    order_id = int(parts[1])
     
     order = get_order_details(order_id)
-    if not order or order[3] != 'pending':
+    if not order or order[4] != 'pending':  # status is now the 5th column (index 4)
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
@@ -347,7 +484,7 @@ async def admin_handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ConversationHandler.END
     
-    code, phone, offer, _ = order
+    code, phone, telegram_id, offer, status = order
     
     if action == "accept":
         user = get_user_by_code(code)
@@ -360,33 +497,51 @@ async def admin_handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return ConversationHandler.END
         
-        credits, telegram_id = user[1], user[3]
+        # Deduct credit only when admin accepts
+        success = deduct_credit(code, offer)
         
-        if credits > 0:
-            update_user_credits(code, credits - 1)
-            update_order_status(order_id, 'confirmed')
-            
-            keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                f"✅ تم تأكيد الطلب {order_id}.\nالكود: {code}\nالتلفون: {phone}\nالعرض: {offer}\nالرصيد المتبقي: {credits - 1}",
-                reply_markup=reply_markup
-            )
-            
-            if telegram_id:
-                await context.bot.send_message(
-                    chat_id=telegram_id,
-                    text=f"تم تأكيد طلبك!\nالتلفون: {phone}\nالعرض: {offer}\nالرصيد المتبقي: {credits - 1}"
-                )
-        else:
+        if not success:
             keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
                 f"المستخدم {code} ما عندوش رصيد كافي.",
                 reply_markup=reply_markup
             )
-    
+            return ConversationHandler.END
+        
+        update_order_status(order_id, 'confirmed')
+        
+        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"✅ تم تأكيد الطلب {order_id}.\n"
+            f"الكود: {code}\n"
+            f"التلفون: {phone}\n"
+            f"Telegram ID: {telegram_id}\n"
+            f"العرض: {offer}",
+            reply_markup=reply_markup
+        )
+        
+        if telegram_id:
+            # Get updated credits after deduction
+            user_credits = get_user_credits(code)
+            if user_credits:
+                credits_summary = (
+                    f"25GO: {user_credits['credits_25go']}, "
+                    f"35GO: {user_credits['credits_35go']}, "
+                    f"60GO: {user_credits['credits_60go']}"
+                )
+            else:
+                credits_summary = "غير معروف"
+            
+            await context.bot.send_message(
+                chat_id=telegram_id,
+                text=f"تم تأكيد طلبك!\n"
+                     f"التلفون: {phone}\n"
+                     f"العرض: {offer}\n"
+                     f"الرصيد المتبقي: {credits_summary}"
+            )    
     elif action == "reject":
         context.user_data['reject_order_id'] = order_id
         context.user_data['reject_code'] = code
@@ -425,13 +580,13 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
         return ConversationHandler.END
     
+    # Get the complete user record to access the telegram_id
     user = get_user_by_code(code)
     if not user:
         await update.message.reply_text("المستخدم غير موجود.")
         return ConversationHandler.END
     
-    telegram_id, credits = user[3], user[1]
-    
+    # Update order status with rejection reason
     update_order_status(order_id, 'rejected', reject_reason)
     
     keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
@@ -442,101 +597,204 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=reply_markup
     )
     
+    # The telegram_id is at index 5 in the user tuple (based on the DB schema)
+    telegram_id = user[5] if len(user) > 5 else None
+    
     if telegram_id:
-        keyboard = [[InlineKeyboardButton("حاول مرة أخرى", callback_data=f"retry_{code}_{credits}")]]
+        # Create retry keyboard for the user
+        keyboard = [[InlineKeyboardButton("حاول مرة أخرى", callback_data=f"retry_{code}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await context.bot.send_message(
-            chat_id=telegram_id,
-            text=f"تم رفض طلبك.\nالتلفون: {phone}\nالعرض: {offer}\nالسبب: {reject_reason}",
-            reply_markup=reply_markup
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=telegram_id,
+                text=f"تم رفض طلبك.\nالتلفون: {phone}\nالعرض: {offer}\nالسبب: {reject_reason}",
+                reply_markup=reply_markup
+            )
+            logger.info(f"Sent rejection notification to user {code} with telegram_id {telegram_id}")
+        except Exception as e:
+            logger.error(f"Failed to send rejection notification to user {code}: {e}")
+    else:
+        logger.warning(f"Could not send rejection notification to user {code} - no Telegram ID found")
     
     return ConversationHandler.END
-
 
 async def handle_refill_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handler for admin confirming or rejecting refill requests"""
     query = update.callback_query
     await query.answer()
-     
-    # Parse the callback data - format is: "action_refill_code_txid"
-    data_parts = query.data.split('_', 3)
-    if len(data_parts) < 4:
+    
+    # Parse the callback data
+    data_parts = query.data.split('_')
+    action = data_parts[0]  # confirm or reject
+    
+    # Handle different data formats
+    if len(data_parts) >= 4 and data_parts[1] == "refill":
+        # Format: "action_refill_code_txid"
+        code = data_parts[2]
+        sanitized_tx_id = data_parts[3] if len(data_parts) > 3 else ""
+    elif len(data_parts) >= 3 and data_parts[1] == "refill":
+        # Format: "action_refill_code" (no txid)
+        code = data_parts[2]
+        sanitized_tx_id = ""
+    else:
         await query.edit_message_text("خطأ في بيانات الطلب")
         return ConversationHandler.END
     
-    action = data_parts[0]  # confirm or reject
-    code = data_parts[2]
-    sanitized_tx_id = data_parts[3]
+    # Store in context for later use
+    context.user_data['refill_code'] = code
+    context.user_data['refill_tx_id'] = sanitized_tx_id
     
-    # Get the original message text to extract the full TX ID
-    message_text = query.message.text
-    import re
-    tx_id_match = re.search(r'رقم المعاملة: `([^`]+)`', message_text)
-    tx_id = tx_id_match.group(1) if tx_id_match else sanitized_tx_id
+    if action == "confirm":
+        # Ask admin which credit type to add
+        keyboard = [
+            [InlineKeyboardButton("25GO (150 USDT)", callback_data="confirm_25go")],
+            [InlineKeyboardButton("35GO (295 USDT)", callback_data="confirm_35go")],
+            [InlineKeyboardButton("60GO (400 USDT)", callback_data="confirm_60go")],
+            [InlineKeyboardButton("❌ رفض", callback_data=f"reject_refill_{code}_{sanitized_tx_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"اختر نوع الرصيد لإضافته للمستخدم {code}:",
+            reply_markup=reply_markup
+        )
+        return ADMIN_SELECT_CREDIT_TYPE
     
-    logger.info(f"Admin {action}ed refill for user {code} with TXID {tx_id}")
+    elif action == "reject":
+        # Handle rejection immediately
+        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"❌ تم رفض طلب شحن الرصيد للمستخدم {code}.",
+            reply_markup=reply_markup
+        )
+        
+        # Notify user about rejection
+        user = get_user_by_code(code)
+        if user and len(user) > 5:
+            telegram_id = user[5]  # Assuming telegram_id is at index 5
+            try:
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"❌ تم رفض طلب شحن الرصيد الخاص بك.\n"
+                         f"الرجاء التأكد من صحة المعاملة أو التواصل مع الإدارة."
+                )
+            except Exception as e:
+                logger.error(f"Failed to send rejection to user {code}: {e}")
+        
+        return ConversationHandler.END
+async def admin_select_refill_credit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle admin's selection of credit type for refill"""
+    query = update.callback_query
+    await query.answer()
     
+    credit_type = query.data.replace("confirm_", "")
+    code = context.user_data.get('refill_code')
+    tx_id = context.user_data.get('refill_tx_id')
+    
+    if not code or not tx_id:
+        await query.edit_message_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+        return ConversationHandler.END
+    
+    # Get the complete user record including telegram_id
     user = get_user_by_code(code)
     if not user:
         await query.edit_message_text(f"المستخدم {code} غير موجود.")
         return ConversationHandler.END
     
-    current_credits = user[1]
-    telegram_id = user[3]
+    # Get current credits
+    user_credits = get_user_credits(code) or {
+        'credits_25go': 0,
+        'credits_35go': 0,
+        'credits_60go': 0
+    }
     
-    if action == "confirm":
-        # Amount to add (can be modified to variable amounts)
-        added_credits = 50
-        new_credits = current_credits + added_credits
-        
-        # Update user credits
-        update_user_credits(code, new_credits)
-        
-        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"✅ تم تأكيد شحن رصيد للمستخدم {code}.\nرقم المعاملة: {tx_id}\nالرصيد السابق: {current_credits}\nالرصيد الجديد: {new_credits} (+{added_credits})",
-            reply_markup=reply_markup
-        )
-        
-        # Notify user
-        if telegram_id:
-            retry_keyboard = [[InlineKeyboardButton("بدء طلب جديد", callback_data=f"retry_{code}_{new_credits}")]]
-            retry_markup = InlineKeyboardMarkup(retry_keyboard)
-            
-            try:
-                await context.bot.send_message(
-                    chat_id=telegram_id,
-                    text=f"✅ تم شحن رصيدك بنجاح!\nالرصيد السابق: {current_credits}\nالرصيد الجديد: {new_credits}\nيمكنك الآن متابعة طلبك.",
-                    reply_markup=retry_markup
-                )
-            except Exception as e:
-                logger.error(f"Failed to send confirmation to user {code}: {e}")
+    # Amount to add (50 credits to the selected type)
+    added_credits = 50
+    user_credits[f'credits_{credit_type}'] += added_credits
     
-    elif action == "reject":
-        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"❌ تم رفض طلب شحن الرصيد للمستخدم {code}.\nرقم المعاملة: {tx_id}",
-            reply_markup=reply_markup
-        )
-        
-        # Notify user about rejection
-        if telegram_id:
-            retry_keyboard = [[InlineKeyboardButton("محاولة شحن أخرى", callback_data="refill_credits")]]
-            retry_markup = InlineKeyboardMarkup(retry_keyboard)
+    # Update user credits
+    add_or_update_user(
+        code,
+        user_credits['credits_25go'],
+        user_credits['credits_35go'],
+        user_credits['credits_60go']
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_dashboard")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Prepare credit type name in Arabic for the message
+    credit_type_arabic = {
+        '25go': '25 جيجا',
+        '35go': '35 جيجا',
+        '60go': '60 جيجا'
+    }.get(credit_type, credit_type.upper())
+    
+    # Prepare the amount paid in Arabic for the message
+    amount_paid = {
+        '25go': '150 USDT',
+        '35go': '295 USDT',
+        '60go': '400 USDT'
+    }.get(credit_type, '')
+    
+    # Admin confirmation message
+    await query.edit_message_text(
+        f"✅ تم تأكيد شحن الرصيد بنجاح!\n\n"
+        f"• الكود: {code}\n"
+        f"• نوع الرصيد: {credit_type_arabic}\n"
+        f"• المبلغ: {amount_paid}\n"
+        f"• رقم المعاملة: {tx_id}\n\n"
+        f"الرصيد الجديد:\n"
+        f"- 25GO: {user_credits['credits_25go']}\n"
+        f"- 35GO: {user_credits['credits_35go']}\n"
+        f"- 60GO: {user_credits['credits_60go']}",
+        reply_markup=reply_markup
+    )
+    
+    # Notify user with a detailed message
+    # Assuming telegram_id is at index 5 in the user tuple
+    telegram_id = user[5] 
+    
+    if telegram_id:
+        try:
+            # Create a keyboard for the user to start a new order
+            keyboard = [
+                [InlineKeyboardButton("بدء طلب جديد", callback_data=f"retry_{code}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-            try:
-                await context.bot.send_message(
-                    chat_id=telegram_id,
-                    text=f"❌ تم رفض طلب شحن الرصيد الخاص بك.\nرقم المعاملة: {tx_id}\nالرجاء التأكد من صحة المعاملة أو التواصل مع الإدارة.",
-                    reply_markup=retry_markup
-                )
-            except Exception as e:
-                logger.error(f"Failed to send rejection to user {code}: {e}")
+            # Send notification to user
+            await context.bot.send_message(
+                chat_id=telegram_id,
+                text=f"🎉 تم قبول معاملتك بنجاح!\n\n"
+                     f"• نوع الباقة: {credit_type_arabic}\n"
+                     f"• المبلغ: {amount_paid}\n"
+                     f"• رقم المعاملة: {tx_id}\n\n"
+                     f"تم إضافة 50 رصيد إلى حسابك:\n"
+                     f"- 25GO: {user_credits['credits_25go']}\n"
+                     f"- 35GO: {user_credits['credits_35go']}\n"
+                     f"- 60GO: {user_credits['credits_60go']}\n\n"
+                     f"يمكنك الآن البدء في طلب جديد.",
+                reply_markup=reply_markup
+            )
+            logger.info(f"Successfully notified user {code} (Telegram ID: {telegram_id}) about accepted transaction")
+        except Exception as e:
+            logger.error(f"Failed to send confirmation to user {code}: {e}")
+            # Notify admin if user notification failed
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⚠️ تمت إضافة الرصيد للمستخدم {code} ولكن فشل إرسال الإشعار له.\n"
+                     f"الرجاء إعلامه يدوياً."
+            )
+    else:
+        logger.warning(f"Could not notify user {code} - no Telegram ID found")
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ تمت إضافة الرصيد للمستخدم {code} ولكن لا يوجد معرف تلغرام مسجل.\n"
+                 f"الرجاء إعلامه يدوياً."
+        )
     
     return ConversationHandler.END
