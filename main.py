@@ -12,11 +12,11 @@ from handlers.admin import (
     show_admin_dashboard, admin_handle_dashboard, admin_add_code, admin_add_credits,
     select_user_for_credit, admin_alter_credit, view_order_details, confirm_delete_user,
     admin_handle_order, cancel_reject, admin_reject_reason, handle_refill_confirmation,
-    admin_select_credit_type, admin_enter_credits,admin_select_refill_credit_type
+    admin_select_credit_type, admin_enter_credits
 )
 from handlers.user import (
     start, refill_credits_command, identify, phone, offer, retry,
-    continue_without_refill, refill_credits, handle_tx_id
+    continue_without_refill, refill_credits, handle_tx_id, cancel_refill, handle_refill_offer_choice
 )
 from database import init_db
 from constants import *
@@ -61,8 +61,7 @@ def main() -> None:
     
     # Admin conversation handler for rejection process
     admin_reject_handler = ConversationHandler(
-       entry_points=[CallbackQueryHandler(admin_handle_order, pattern='^reject_\d+$')], 
-       # entry_points=[CallbackQueryHandler(admin_handle_order, pattern='^reject_')],
+        entry_points=[CallbackQueryHandler(admin_handle_order, pattern='^reject_\d+$')],
         states={
             REJECT_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reject_reason)],
         },
@@ -77,19 +76,12 @@ def main() -> None:
         entry_points=[
             CommandHandler('start', start),
             CallbackQueryHandler(retry, pattern='^retry_'),
-            CallbackQueryHandler(continue_without_refill, pattern='^continue_without_refill$'),
-            CallbackQueryHandler(refill_credits, pattern='^refill_credits$')
+            CallbackQueryHandler(continue_without_refill, pattern='^continue_without_refill$')
         ],
         states={
-            IDENTIFY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, identify)
-            ],
-            PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, phone)
-            ],
-            OFFER: [
-                CallbackQueryHandler(offer, pattern='^(25GO|35GO|60GO)$')
-            ],
+            IDENTIFY: [MessageHandler(filters.TEXT & ~filters.COMMAND, identify)],
+            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
+            OFFER: [CallbackQueryHandler(offer, pattern='^(25GO|35GO|60GO)$')],
             REFILL_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tx_id)],
             TX_VERIFICATION_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tx_id)]
         },
@@ -103,9 +95,16 @@ def main() -> None:
             CommandHandler('refill', refill_credits_command)
         ],
         states={
+            REFILL_OFFER_CHOICE: [
+                CallbackQueryHandler(handle_refill_offer_choice, pattern='^refill_(25go|35go|60go)$'),
+                CallbackQueryHandler(cancel_refill, pattern='^cancel_refill$')
+            ],
             REFILL_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tx_id)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            CallbackQueryHandler(cancel_refill, pattern='^cancel_refill$')
+        ],
     )
 
     # Add all handlers to application
@@ -119,10 +118,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(admin_handle_dashboard, pattern='^admin_'))
     application.add_handler(CallbackQueryHandler(view_order_details, pattern='^view_order_'))
     application.add_handler(CallbackQueryHandler(confirm_delete_user, pattern='^confirm_delete_'))
-    application.add_handler(CallbackQueryHandler(
-    admin_select_refill_credit_type, 
-    pattern='^confirm_(25go|35go|60go)$'
-    ))
+    
     # Order handling
     application.add_handler(CallbackQueryHandler(admin_handle_order, pattern='^(accept|reject)_\d+$'))
     

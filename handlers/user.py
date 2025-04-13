@@ -38,7 +38,7 @@ async def identify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return IDENTIFY
     
     code = update.message.text
-    telegram_id = update.message.from_user.id  # Get the telegram_id directly from the update
+    telegram_id = update.message.from_user.id
     
     user = get_user_by_code(code)
     if user is None:
@@ -52,21 +52,20 @@ async def identify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("حدث خطأ في تحميل رصيدك. راسل الإدارة.")
         return ConversationHandler.END
     
-    # Always update the telegram_id when user identifies themselves
+    # Update telegram_id
     add_or_update_user(
         code,
         user_credits['credits_25go'],
         user_credits['credits_35go'],
         user_credits['credits_60go'],
-        telegram_id  # Make sure this is included
+        telegram_id
     )
     total_credits = user_credits['credits_25go'] + user_credits['credits_35go'] + user_credits['credits_60go']
+    
+    context.user_data['code'] = code
+    context.user_data['credits'] = user_credits
+    
     if total_credits <= 0:
-        add_or_update_user(code, user_credits['credits_25go'], user_credits['credits_35go'], 
-                         user_credits['credits_60go'], telegram_id)
-        context.user_data['code'] = code
-        context.user_data['credits'] = user_credits
-        
         keyboard = [[InlineKeyboardButton("شحن الرصيد", callback_data="refill_credits")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -74,36 +73,27 @@ async def identify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "عذرًا، ليس لديك رصيد كافي لتنفيذ طلب. يرجى شحن رصيدك.",
             reply_markup=reply_markup
         )
+        logger.info(f"User {code} has no credits, prompted to refill")
         return ConversationHandler.END
     elif total_credits < 3:
-        add_or_update_user(code, user_credits['credits_25go'], user_credits['credits_35go'], 
-                       user_credits['credits_60go'], telegram_id)
-        context.user_data['code'] = code
-        context.user_data['credits'] = user_credits
-    
         keyboard = [
-        [InlineKeyboardButton("شحن الرصيد", callback_data="refill_credits")],
-        [InlineKeyboardButton("متابعة بدون شحن", callback_data="continue_without_refill")]
+            [InlineKeyboardButton("شحن الرصيد", callback_data="refill_credits")],
+            [InlineKeyboardButton("متابعة بدون شحن", callback_data="continue_without_refill")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
     
         credits_summary = (
-        f"25GO: {user_credits['credits_25go']}, "
-        f"35GO: {user_credits['credits_35go']}, "
-        f"60GO: {user_credits['credits_60go']}"
+            f"25GO: {user_credits['credits_25go']}, "
+            f"35GO: {user_credits['credits_35go']}, "
+            f"60GO: {user_credits['credits_60go']}"
         )
     
         await update.message.reply_text(
-        f"تم التحقق من الكود! رصيدك: {credits_summary}. نقترح عليك شحن رصيدك قبل المتابعة.",
-        reply_markup=reply_markup
+            f"تم التحقق من الكود! رصيدك: {credits_summary}. نقترح عليك شحن رصيدك قبل المتابعة.",
+            reply_markup=reply_markup
         )
+        logger.info(f"User {code} has low credits ({total_credits}), prompted to refill or continue")
         return ConversationHandler.END
-    
-    add_or_update_user(code, user_credits['credits_25go'], user_credits['credits_35go'], 
-                     user_credits['credits_60go'], telegram_id)
-    
-    context.user_data['code'] = code
-    context.user_data['credits'] = user_credits
     
     credits_summary = (
         f"25GO: {user_credits['credits_25go']}, "
@@ -112,8 +102,7 @@ async def identify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
 
     await update.message.reply_text(
-        f"تم التحقق من الكود! رصيدك: {credits_summary}\nأكتب رقم التلفون متاعك (مثلا 99000111).",
-    
+        f"تم التحقق من الكود! رصيدك: {credits_summary}\nأكتب رقم التلفون متاعك (مثلا 99000111)."
     )
     logger.info(f"Transitioning to PHONE state for code: {code}")
     return PHONE
@@ -152,19 +141,64 @@ async def refill_credits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     
-    refill_message = (
-        "📌 لشراء الرصيد:\n\n"
-        "1. اختر نوع الرصيد الذي تريد شراءه:\n"
-        "- 25GO: 150 USDT لـ 50 رصيد\n"
-        "- 35GO: 295 USDT لـ 50 رصيد\n"
-        "- 60GO: 400 USDT لـ 50 رصيد\n\n"
+    code = context.user_data.get('code')
+    logger.info(f"Refill credits triggered for user code: {code}")
+    
+    if not code:
+        logger.warning("No user code found in context.user_data")
+        await query.edit_message_text("خطأ: يرجى بدء المحادثة باستخدام /start أولاً.")
+        return ConversationHandler.END
+    
+    keyboard = [
+        [InlineKeyboardButton("25GO (150 USDT)", callback_data="refill_25go")],
+        [InlineKeyboardButton("35GO (295 USDT)", callback_data="refill_35go")],
+        [InlineKeyboardButton("60GO (400 USDT)", callback_data="refill_60go")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="cancel_refill")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "اختر نوع الرصيد الذي تريد شحنه:",
+        reply_markup=reply_markup
+    )
+    logger.info(f"Transitioning to state: REFILL_OFFER_CHOICE ({REFILL_OFFER_CHOICE})")
+    return REFILL_OFFER_CHOICE
+
+async def handle_refill_offer_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    selected_offer = query.data.replace("refill_", "")
+    context.user_data['refill_offer'] = selected_offer
+    
+    offer_prices = {
+        '25go': '150 USDT',
+        '35go': '295 USDT',
+        '60go': '400 USDT'
+    }
+    
+    price = offer_prices.get(selected_offer, '')
+    
+    await query.edit_message_text(
+        f"📌 لشراء رصيد {selected_offer.upper()}:\n\n"
+        f"1. المبلغ المطلوب: {price}\n"
         f"2. أرسل المبلغ عبر شبكة TRON (TRC20) إلى العنوان التالي: `{USDT_WALLET}`\n\n"
         "✅ ستحصل على 50 رصيد مباشرة بعد التحقق من التحويل\n\n"
-        "📝 بعد الإرسال، أرسل لنا رقم المعاملة (TXID) للتحقق وإضافة الرصيد إلى حسابك"
+        "📝 بعد الإرسال، أرسل لنا رقم المعاملة (TXID) للتحقق وإضافة الرصيد إلى حسابك",
+        parse_mode="Markdown"
     )
-    
-    await query.edit_message_text(refill_message, parse_mode="Markdown")
     return REFILL_STATE
+
+async def cancel_refill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    # Clear any refill data
+    context.user_data.pop('refill_offer', None)
+    
+    # Return to start
+    await start(update, context)
+    return ConversationHandler.END
 
 async def continue_without_refill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -194,6 +228,7 @@ async def handle_tx_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     code = context.user_data.get('code')
     user_credits = context.user_data.get('credits', {})
     user_id = update.message.from_user.id
+    offer_type = context.user_data.get('refill_offer', '').upper()  # Get selected offer
     
     # Create a summary of current credits
     if user_credits:
@@ -205,7 +240,7 @@ async def handle_tx_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     else:
         current_credits = "غير متوفر"
     
-    logger.info(f"User {code} submitted TXID: {tx_id}")
+    logger.info(f"User {code} submitted TXID: {tx_id} for {offer_type} refill")
     
     # Sanitize tx_id to ensure it's safe for callback data
     sanitized_tx_id = re.sub(r'[^a-zA-Z0-9\-_]', '', tx_id)
@@ -214,20 +249,27 @@ async def handle_tx_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # Store the full tx_id in user_data for reference
     context.user_data['full_tx_id'] = tx_id
     
+    # Include credit_type in callback data
+    credit_type = context.user_data.get('refill_offer', '')
+    if not credit_type:
+        logger.error(f"No refill_offer found for user {code}")
+        await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+        return ConversationHandler.END
+    
     # Create accept/reject buttons for admin
     keyboard = [
         [
-            InlineKeyboardButton("✅ تأكيد الشحن", callback_data=f"confirm_refill_{code}_{sanitized_tx_id}"),
-            InlineKeyboardButton("❌ رفض الشحن", callback_data=f"reject_refill_{code}_{sanitized_tx_id}")
+            InlineKeyboardButton("✅ تأكيد الشحن", callback_data=f"confirm_refill_{code}_{sanitized_tx_id}_{credit_type}"),
+            InlineKeyboardButton("❌ رفض الشحن", callback_data=f"reject_refill_{code}_{sanitized_tx_id}_{credit_type}")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     try:
-        # Send full TX ID in the message text, but use sanitized version in callback data
+        # Send full TX ID in the message text
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🔄 طلب شحن رصيد جديد!\nالكود: {code}\nالمستخدم: {user_id}\nرقم المعاملة: `{tx_id}`\nالرصيد الحالي: {current_credits}",
+            text=f"🔄 طلب شحن رصيد جديد!\nالكود: {code}\nالعرض: {offer_type}\nالمستخدم: {user_id}\nرقم المعاملة: `{tx_id}`\nالرصيد الحالي: {current_credits}",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
