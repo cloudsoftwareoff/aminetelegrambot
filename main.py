@@ -99,7 +99,7 @@ def main() -> None:
             CallbackQueryHandler(retry, pattern='^retry_'),
             CallbackQueryHandler(continue_without_refill, pattern='^continue_without_refill$'),
             CallbackQueryHandler(retry_code, pattern='^retry_code$'),
-            CallbackQueryHandler(proceed_to_phone, pattern='^proceed_to_phone$')
+           
         ],
         states={
             IDENTIFY: [MessageHandler(filters.TEXT & ~filters.COMMAND, identify)],
